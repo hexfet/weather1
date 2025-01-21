@@ -41,7 +41,7 @@ typedef struct {
 
 static volatile weather_data_t weather_data;
 
-static const char *TAG = "web_server";
+static const char *TAG = "weather1";
 
 #define I2C_PIN_SDA 21
 #define I2C_PIN_SCL 22

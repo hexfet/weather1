@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS C:\\Users\\jon\\esp\\esp-idf-lib\\components)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(web_server)
+project(weather1)
 
 # Add custom target
 # add_custom_target(html_processing DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/index_html.h)
