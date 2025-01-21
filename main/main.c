@@ -424,8 +424,8 @@ void app_main(void)
     /* Start the server for the first time */
     server = start_webserver();
 
-    xTaskCreate(&bmp180_task, "bmp180_task", 1024*4, &weather_data, 5, NULL);
-    xTaskCreate(&hmc5883l_task, "hmc5883l_task", 1024*4, &weather_data, 5, NULL);
+    xTaskCreate(&bmp180_task, "bmp180_task", 1024*4, (void *)&weather_data, 5, NULL);
+    xTaskCreate(&hmc5883l_task, "hmc5883l_task", 1024*4, (void *)&weather_data, 5, NULL);
 
     ESP_LOGI(TAG, "End of initialization. server=%p", server);
 
