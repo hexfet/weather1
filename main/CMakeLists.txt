@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "wifi_interface.c" "index.html.h" "weather.css.h"
+idf_component_register(SRCS "weather.h" "main.c" "wifi_interface.c" "web_server.c" "index.html.h" "weather.css.h"
                        INCLUDE_DIRS ".")
 
 add_custom_command(

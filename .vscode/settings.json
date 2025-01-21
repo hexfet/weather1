@@ -10,6 +10,8 @@
     "files.associations": {
         "esp_log.h": "c",
         "hmc5883l.h": "c",
-        "index.html.h": "c"
+        "index.html.h": "c",
+        "esp_check.h": "c",
+        "bmp180.h": "c"
     }
 }
