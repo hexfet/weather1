@@ -8,10 +8,115 @@
 #include "esp_http_server.h"
 #include "esp_wifi.h"
 
+#include "freertos/queue.h"
+#include "cJSON.h"
+
 #include "weather.h"
 
 static const char *TAG = "web_server";
 
+// Functions for web socket handling
+httpd_handle_t server;
+int client_fd;
+
+// callback function to be put onto httpd work queue
+static void ws_async_send(void *arg)
+{
+    ESP_LOGD(TAG, "ws_async_send with arg = %p. client_fd = %d", arg, client_fd);
+
+    // Create JSON object
+    cJSON *root = cJSON_CreateObject();
+    
+    // Add sensor data from weather_data structure
+    cJSON *temp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(temp, "c", weather_data.temperature);
+    cJSON_AddNumberToObject(temp, "f", (weather_data.temperature * 9.0/5.0) + 32);
+    cJSON_AddItemToObject(root, "temperature", temp);
+
+    cJSON *pressure = cJSON_CreateObject();
+    cJSON_AddNumberToObject(pressure, "pa", weather_data.pressure);
+    cJSON_AddNumberToObject(pressure, "inhg", weather_data.pressure / 3386.0);
+    cJSON_AddItemToObject(root, "pressure", pressure);
+
+    cJSON *altitude = cJSON_CreateObject();
+    cJSON_AddNumberToObject(altitude, "m", weather_data.altitude);
+    cJSON_AddNumberToObject(altitude, "ft", weather_data.altitude * 3.281);
+    cJSON_AddItemToObject(root, "altitude", altitude);
+
+    cJSON_AddNumberToObject(root, "heading", weather_data.angle);
+
+    cJSON *magnetic = cJSON_CreateObject();
+    cJSON_AddNumberToObject(magnetic, "x", weather_data.x);
+    cJSON_AddNumberToObject(magnetic, "y", weather_data.y);
+    cJSON_AddNumberToObject(magnetic, "z", weather_data.z);
+    cJSON_AddItemToObject(root, "magnetic", magnetic);
+
+    // Convert to string
+    char *json_string = cJSON_PrintUnformatted(root);
+    
+    // Send via websocket
+    httpd_ws_frame_t ws_pkt;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.payload = (uint8_t*)json_string;
+    ws_pkt.len = strlen(json_string);
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+
+    esp_err_t ret = httpd_ws_send_frame_async(server, client_fd, &ws_pkt);
+    ESP_LOGD(TAG, "httpd_ws_send_frame_async returned %d", (int)ret);
+
+    cJSON_Delete(root);
+    free(json_string);
+}
+
+static esp_err_t ws_data_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+         return ESP_OK;
+    }
+
+    client_fd = httpd_req_to_sockfd(req);
+    ESP_LOGI(TAG, "ws_data_handler set client_fd %d", client_fd);
+
+    httpd_ws_frame_t ws_pkt;
+    uint8_t *buf = NULL;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+    /* Set max_len = 0 to get the frame len */
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ws_recv_frame failed to get frame len with %d", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "frame len is %d", ws_pkt.len);
+    if (ws_pkt.len) {
+        /* ws_pkt.len + 1 is for NULL termination as we are expecting a string */
+        buf = calloc(1, ws_pkt.len + 1);
+        if (buf == NULL) {
+            ESP_LOGE(TAG, "Failed to calloc memory for buf");
+            return ESP_ERR_NO_MEM;
+        }
+        ws_pkt.payload = buf;
+        /* Set max_len = ws_pkt.len to get the frame payload */
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_ws_recv_frame failed with %d", ret);
+            free(buf);
+            return ret;
+        }
+        ESP_LOGI(TAG, "Got packet with message: %s", ws_pkt.payload);
+    }
+    ESP_LOGI(TAG, "Packet type: %d", ws_pkt.type);
+
+    ret = httpd_ws_send_frame(req, &ws_pkt);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ws_send_frame failed with %d", ret);
+    }
+    free(buf);
+    return ret;
+}
+
+
+// Functions to implement web pages
 /* Function to free context */
 static void adder_free_func(void *ctx)
 {
@@ -64,8 +169,7 @@ static esp_err_t weather_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-#include "index.html.h"
-#include "weather.css.h"
+#include "web_content.h"
 
 /* This handler gets the present value of the accumulator */
 static esp_err_t weather_get_handler(httpd_req_t *req)
@@ -86,22 +190,16 @@ static esp_err_t weather_get_handler(httpd_req_t *req)
 
     if (strcmp(req->uri, "/weather.css") == 0) {
         httpd_resp_set_type(req, "text/css");
-        httpd_resp_send(req, weather_css, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send(req, css__weather, HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
+    if (strcmp(req->uri, "/weather.js") == 0) {
+        httpd_resp_set_type(req, "text/javascript");
+        httpd_resp_send(req, js__weather, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }    
 
-    uint32_t buf_size = strlen(index_html) + 100;
-    char *buffer = malloc(buf_size);
-    snprintf(buffer, buf_size, index_html, weather_data.temperature, (weather_data.temperature * 9 / 5)+32,
-                                           weather_data.pressure, (float)weather_data.pressure / 3886.0,
-                                           weather_data.altitude, weather_data.altitude * 3.281,
-                                           weather_data.angle,
-                                           weather_data.x,
-                                           weather_data.y,
-                                           weather_data.z
-  );
-    httpd_resp_send(req, buffer, HTTPD_RESP_USE_STRLEN);
-    free(buffer);
+    httpd_resp_send(req, html__index, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -214,6 +312,20 @@ static const httpd_uri_t weather_get3 = {
     .handler  = weather_get_handler,
     .user_ctx = &visitors
 };
+static const httpd_uri_t weather_get4 = {
+    .uri      = "/weather.js",
+    .method   = HTTP_GET,
+    .handler  = weather_get_handler,
+    .user_ctx = &visitors
+};
+static const httpd_uri_t websocket = {
+        .uri        = "/ws",
+        .method     = HTTP_GET,
+        .handler    = ws_data_handler,
+        .user_ctx   = NULL,
+        .is_websocket = true
+};
+
 
 #if CONFIG_EXAMPLE_SESSION_CTX_HANDLERS
 static const httpd_uri_t login = {
@@ -268,28 +380,31 @@ static void connect_handler(void* arg, esp_event_base_t event_base,
 httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    
     // Start the httpd server
     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
-    static httpd_handle_t server;
 
     if (httpd_start(&server, &config) == ESP_OK) {
         /* Register event handlers to stop the server when Wi-Fi or Ethernet is disconnected,
-     * and re-start it upon connection.
-     */
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &connect_handler, &server));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &disconnect_handler, &server));
+        * and re-start it upon connection.
+        */
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &connect_handler, &server));
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &disconnect_handler, &server));
     
         // Set URI handlers
         ESP_LOGI(TAG, "Registering URI handlers");
+        httpd_register_uri_handler(server, &websocket);
         httpd_register_uri_handler(server, &weather_get);
         httpd_register_uri_handler(server, &weather_get2);
-        httpd_register_uri_handler(server, &weather_get3);                
+        httpd_register_uri_handler(server, &weather_get3);
+        httpd_register_uri_handler(server, &weather_get4);                
 #if CONFIG_EXAMPLE_SESSION_CTX_HANDLERS
         httpd_register_uri_handler(server, &login);
         httpd_register_uri_handler(server, &logout);
 #endif // CONFIG_EXAMPLE_SESSION_CTX_HANDLERS
         httpd_register_uri_handler(server, &weather_put);
         httpd_register_uri_handler(server, &weather_post);
+
         return server;
     }
 
@@ -299,6 +414,16 @@ httpd_handle_t start_webserver(void)
 
 static esp_err_t stop_webserver(httpd_handle_t server)
 {
-    // Stop the httpd server
-    return httpd_stop(server);
+    esp_err_t ret = httpd_stop(server);
+    server = NULL;
+    return ret;
+}
+
+// Add function to send sensor data
+esp_err_t send_sensor_data(sensor_message_t *msg)
+{
+    if (server && client_fd) {
+        return httpd_queue_work(server, ws_async_send, NULL);
+    }
+    return ESP_FAIL;
 }
