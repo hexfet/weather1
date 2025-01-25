@@ -12,6 +12,7 @@
         "hmc5883l.h": "c",
         "index.html.h": "c",
         "esp_check.h": "c",
-        "bmp180.h": "c"
+        "bmp180.h": "c",
+        "esp_http_server.h": "c"
     }
 }
